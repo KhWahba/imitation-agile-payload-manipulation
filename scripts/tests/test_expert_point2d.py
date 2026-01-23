@@ -1,9 +1,12 @@
 import numpy as np
 import mujoco
 
+import sys
+from pathlib import Path
+project_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(project_root / "scripts"))
 from expert_pd_controller import PDExpert
 
-# NEW: import the video utility
 from videos_from_log import (
     VideoConfig,
     render_from_actions,
@@ -23,7 +26,8 @@ def _joint_state(model, data, joint_name: str):
 
 
 def main():
-    xml_path = "../envs/point2d.xml"
+    project_root = Path(__file__).resolve().parents[2]
+    xml_path = str(project_root / "envs/point2d.xml")
 
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)

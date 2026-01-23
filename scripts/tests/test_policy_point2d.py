@@ -6,14 +6,12 @@ import torch as th
 from imitation.algorithms import bc
 from stable_baselines3.common.vec_env import DummyVecEnv
 from imitation.data.wrappers import RolloutInfoWrapper
-import sys
 from pathlib import Path
 project_root = Path(__file__).resolve().parents[2]
+import sys
 sys.path.insert(0, str(project_root / "scripts"))
 from point2d_env import Point2DEnv
 
-
-# NEW: import the video utility
 from videos_from_log import (
     VideoConfig,
     render_from_actions,
@@ -34,7 +32,6 @@ def _joint_state(model, data, joint_name: str):
 
 def main():
     
-    project_root = Path(__file__).resolve().parents[2]
     xml_path = str(project_root / "envs/point2d.xml")
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
@@ -59,7 +56,6 @@ def main():
         rng=rng,
     )
 
-    project_root = Path(__file__).resolve().parents[2]
     state_dict_path = project_root / "scripts/runs/dagger_point2d/policy_state_dict.pt"
     state_dict = th.load(state_dict_path, map_location="cpu")
     bc_trainer.policy.load_state_dict(state_dict)
