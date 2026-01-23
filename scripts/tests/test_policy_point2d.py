@@ -6,6 +6,10 @@ import torch as th
 from imitation.algorithms import bc
 from stable_baselines3.common.vec_env import DummyVecEnv
 from imitation.data.wrappers import RolloutInfoWrapper
+import sys
+from pathlib import Path
+project_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(project_root / "scripts"))
 from point2d_env import Point2DEnv
 
 
@@ -29,8 +33,9 @@ def _joint_state(model, data, joint_name: str):
 
 
 def main():
-    xml_path = "../envs/point2d.xml"
-    # policy_path = Path("/home/khaledwahba94/inria/imitation-examples/scripts/runs/dagger_point2d/model.zip")
+    
+    project_root = Path(__file__).resolve().parents[2]
+    xml_path = str(project_root / "envs/point2d.xml")
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
 
@@ -54,7 +59,8 @@ def main():
         rng=rng,
     )
 
-    state_dict_path = "/home/khaledwahba94/inria/imitation-examples/scripts/runs/dagger_point2d/policy_state_dict.pt"
+    project_root = Path(__file__).resolve().parents[2]
+    state_dict_path = project_root / "scripts/runs/dagger_point2d/policy_state_dict.pt"
     state_dict = th.load(state_dict_path, map_location="cpu")
     bc_trainer.policy.load_state_dict(state_dict)
 
