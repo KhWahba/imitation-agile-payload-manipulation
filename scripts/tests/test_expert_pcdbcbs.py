@@ -59,17 +59,18 @@ def main():
     # Pick bodies (or infer)
     paths = PcDbCBSPaths(
         bindings_path="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/build",
-        input_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_empty2.yaml",
+        input_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_zerogoal.yaml",
         pc_dbcbs_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/pc_dbcbs_empty.yaml",
-        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt.yaml",
+        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt_expert.yaml",
         dynobench_base="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/",
         motion_primitives_base="/home/khaledwahba94/inria/pc-dbCBS/motion_primitives/",
         time_limit=350000.0,
         work_dir_root="runs/_tmp_pcdbcbs",  # temp root
-        keep_files=False,                   # <== no file clutter
-        warmstart_optimization=False,    # <== disable warmstart for optimization-only mode
+        keep_files=True,                   # <== no file clutter
+        warmstart_optimization=True,    # <== disable warmstart for optimization-only mode
+        N_opt=150,                        # <== number of optimization steps
     )
-    K = 0
+    K = 0  # replan every K steps
     expert = PcDbCBSExpert(paths=paths, act_low=act_low, act_high=act_high, replan_every_k=K)
     expert.reset_episode()
 
@@ -112,7 +113,7 @@ def main():
     cfg = VideoConfig(
         out_dir="videos/test_pcdbcbs_payload",
         fps=50,
-        views=["side", "top"],
+        views=["side", "top", "diag"],
         env_min=[-1.5, -1.5, 0],
         env_max=[+1.5, +1.5, 2],
     )
