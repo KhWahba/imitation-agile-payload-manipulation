@@ -125,7 +125,7 @@ def collect_expert_trajs_and_logs(
             cfg = VideoConfig(
                 out_dir=str(ep_video_dir),
                 fps=50,
-                views=["side", "top"],
+                views=["side"],
                 env_min=np.array([-2.0, -2.0, 0.0], dtype=float),
                 env_max=np.array([+2.0, +2.0, 2.0], dtype=float),
             )
@@ -160,32 +160,33 @@ def main():
 
     # --------- paths ----------
     xml_path = "/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/models/xml/2cfs_payload_tendons_empty.xml"
-    template_yaml = "/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_empty2.yaml"
+    template_yaml = "/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_zerogoal.yaml"
 
     paths = PcDbCBSPaths(
         bindings_path="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/build",
-        input_yaml=template_yaml,
+        input_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_zerogoal.yaml",
         pc_dbcbs_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/pc_dbcbs_empty.yaml",
-        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt.yaml",
+        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt_expert.yaml",
         dynobench_base="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/",
         motion_primitives_base="/home/khaledwahba94/inria/pc-dbCBS/motion_primitives/",
-        work_dir_root="runs/_tmp_pcdbcbs",
-        keep_files=False,
-        warmstart_optimization=False,
         time_limit=350000.0,
+        work_dir_root="runs/_tmp_pcdbcbs",  # temp root
+        keep_files=True,                   # <== no file clutter
+        warmstart_optimization=False,    # <== disable warmstart for optimization-only mode
+        N_opt=120,                        # <== number of optimization steps
     )
 
     # --------- env factory ----------
-    def make_env():
+    def make_env(max_steps: int = 200):
         env = PayloadGymEnv(
             xml_path=xml_path,
             template_yaml_path=template_yaml,
-            max_steps=200,
+            max_steps=max_steps,
         )
         return RolloutInfoWrapper(env)
 
     # VecEnv for DAgger trainer + eval
-    venv = DummyVecEnv([make_env])
+    venv = DummyVecEnv([lambda: make_env(max_steps=200)])
 
     # --------- expert ----------
     tmp_env = PayloadGymEnv(xml_path=xml_path, template_yaml_path=template_yaml, max_steps=200)
@@ -224,9 +225,9 @@ def main():
         print(f"Loaded cached expert_trajs: {trajs_pkl} (n={len(expert_trajs)})")
     else:
         expert_trajs, npz_paths = collect_expert_trajs_and_logs(
-            env_fn=make_env,
+            env_fn=lambda: make_env(max_steps=250),
             expert=expert,
-            n_episodes=2,  # <-- only seeds round-0; DAgger training still runs many episodes later
+            n_episodes=20,  # <-- only seeds round-0; DAgger training still runs many episodes later
             xml_path=xml_path,
             logs_dir=str(logs_dir),
             video_root_dir=str(video_root),
@@ -237,6 +238,14 @@ def main():
         print(f"Saved cached expert_trajs: {trajs_pkl} (n={len(expert_trajs)})")
 
     print(f"Collected/loaded {len(expert_trajs)} expert trajectories for round-0 seed.")
+    # exit()
+    # expert_policy.expert.paths.warmstart_optimization = True  # enable warmstarting for DAgger rounds
+    expert_policy.expert.replan_every_k = 5                        # set number of optimization steps
+    expert_policy.expert.paths.N_opt = 100                        # set number of optimization steps
+    expert_policy.expert.paths.keep_files = False
+    expert_policy.expert.paths.opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt_training.yaml"
+    expert_policy.expert.paths.warmstart_optimization = True  # enable warmstarting for DAgger rounds
+    # exit()
     # --------- BC learner ----------
     bc_trainer = bc.BC(
         observation_space=venv.observation_space,
@@ -255,7 +264,7 @@ def main():
             expert_trajs=expert_trajs,
         )
 
-        dagger_trainer.train(1000)  # total number of learner episodes across all DAgger rounds
+        dagger_trainer.train(2000, rollout_round_min_episodes=1, rollout_round_min_timesteps=200)  # total number of learner episodes across all DAgger rounds
 
         mean_return, _ = evaluate_policy(
             dagger_trainer.policy, venv, n_eval_episodes=10, deterministic=True
