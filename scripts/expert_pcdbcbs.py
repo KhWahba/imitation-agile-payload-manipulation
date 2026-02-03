@@ -5,7 +5,7 @@ import tempfile
 import shutil
 import yaml
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import torch as th
@@ -24,6 +24,7 @@ class PcDbCBSPaths:
     work_dir_root: Optional[str] = None
     keep_files: bool = False
     warmstart_optimization: bool = True
+    N_opt: int = 50 
 
 
 class PcDbCBSExpert:
@@ -34,12 +35,18 @@ class PcDbCBSExpert:
         act_high: np.ndarray,
         replan_every_k: int = 0,
         u_nominal: float = 0.034 * 9.81 / 4,
+        goal_switch_dist: float = 0.2,  # meters
     ):
         self.paths = paths
-        self.act_low = np.asarray(act_low, dtype=np.float32)
-        self.act_high = np.asarray(act_high, dtype=np.float32)
+        self.act_low = np.asarray(act_low, dtype=np.float32).reshape(-1)
+        self.act_high = np.asarray(act_high, dtype=np.float32).reshape(-1)
 
         self._template_input_yaml = paths.input_yaml
+
+        # Force a predictable work root (so results/input/meta stay together)
+        if self.paths.work_dir_root is None:
+            self.paths.work_dir_root = "runs/_tmp_pcdbcbs"
+        os.makedirs(self.paths.work_dir_root, exist_ok=True)
 
         if paths.bindings_path not in sys.path:
             sys.path.append(paths.bindings_path)
@@ -59,9 +66,11 @@ class PcDbCBSExpert:
         self._U: Optional[np.ndarray] = None
         self._t: int = 0
         self._global_step: int = 0
+        self._episode_id: int = 0
 
         self.u_nominal = float(u_nominal)
         self.replan_every_k = int(replan_every_k)
+        self.goal_switch_dist = float(goal_switch_dist)
 
         self.size_u: Optional[int] = None
         self.just_replanned = False
@@ -71,61 +80,120 @@ class PcDbCBSExpert:
             cfg = yaml.safe_load(f)
         goal = np.asarray(cfg["joint_robot"][0]["goal"], dtype=np.float32).reshape(-1)
 
-        self._state_dim = int(goal.shape[0])         # <-- IMPORTANT for slicing
+        self._state_dim = int(goal.shape[0])
         self._payload_goal_pos = goal[:3].copy()
-
-        self.goal_switch_dist = 0.2  # meters
 
     @property
     def planned(self) -> bool:
         return self._U is not None
 
     def reset_episode(self):
+        self._episode_id += 1
         self._U = None
         self._t = 0
         self._global_step = 0
 
-    def _make_work_dir(self) -> str:
+    # ----------------------------
+    # Directory + bookkeeping
+    # ----------------------------
+    def _make_plan_dir(self, *, warmstart: bool, reason: str) -> str:
+        """
+        Create a per-plan directory that will contain:
+          input.yaml, meta.yaml, result_dbcbs.yaml, result_dbcbs_opt.yaml, ...
+        """
         root = self.paths.work_dir_root
-        if root is not None:
-            os.makedirs(root, exist_ok=True)
+        os.makedirs(root, exist_ok=True)
 
-        if self.paths.keep_files:
-            return tempfile.mkdtemp(dir=root, prefix="pcdbcbs_")
-        return ""
+        # human-readable directory name for debugging
+        prefix = (
+            f"pcdbcbs_ep{self._episode_id:04d}_"
+            f"gs{self._global_step:07d}_"
+            f"ws{int(bool(warmstart))}_"
+            f"{reason}_"
+        )
+        return tempfile.mkdtemp(dir=root, prefix=prefix)
 
-    def _plan(self):
+    def _write_meta_yaml(self, plan_dir: str, *, reason: str, dist_to_goal: float, warmstart: bool):
+        meta = {
+            "episode_id": int(self._episode_id),
+            "global_step": int(self._global_step),
+            "reason": str(reason),
+            "dist_to_goal": float(dist_to_goal),
+            "warmstart_optimization": bool(warmstart),
+            "t_in_plan_before": int(self._t),
+        }
+        with open(os.path.join(plan_dir, "meta.yaml"), "w") as f:
+            yaml.safe_dump(meta, f)
+
+    # ----------------------------
+    # YAML patching
+    # ----------------------------
+    def _write_patched_input_yaml(self, state: np.ndarray, plan_dir: str) -> str:
+        """
+        Writes plan_dir/input.yaml based on template yaml, but patches start states.
+
+        state is (13*n_bodies):
+          [pose_all (7*n), vel_all (6*n)]
+        pose_i = [pos3, quat_xyzw4]
+        vel_i  = [lin3, ang3]
+        """
+        with open(self._template_input_yaml, "r") as f:
+            cfg = yaml.safe_load(f)
+
+        state = np.asarray(state, dtype=float).reshape(-1)
+        if state.size % 13 != 0:
+            raise ValueError(f"state length {state.size} is not 13*n")
+
+        # Patch joint_robot[0].start (your mujoco "joint" state)
+        cfg["joint_robot"][0]["start"] = state.tolist()
+
+        # Also patch cfg["robots"][i]["start"] if present (quad-only states)
+        n_bodies = state.size // 13
+        n_quads = n_bodies - 1
+
+        if "robots" in cfg and isinstance(cfg["robots"], list) and len(cfg["robots"]) >= n_quads:
+            pose_block = state[: 7 * n_bodies]
+            vel_block = state[7 * n_bodies : 7 * n_bodies + 6 * n_bodies]
+
+            for i in range(n_quads):
+                quad_pose = pose_block[7 * (1 + i) : 7 * (2 + i)]   # skip payload
+                quad_vel = vel_block[6 * (1 + i) : 6 * (2 + i)]     # skip payload
+                cfg["robots"][i]["start"] = np.concatenate([quad_pose, quad_vel]).tolist()
+
+        os.makedirs(plan_dir, exist_ok=True)
+        patched_yaml = os.path.join(plan_dir, "input.yaml")
+        with open(patched_yaml, "w") as f:
+            yaml.safe_dump(cfg, f)
+
+        return patched_yaml
+
+    # ----------------------------
+    # Planning
+    # ----------------------------
+    def _plan(self, input_yaml: str, plan_dir: str, warmstart: bool):
         opt = self.pcdbcbs.Options()
         opt.override_visualize_mujoco = False
         opt.visualize_mujoco = False
 
-        opt.input_yaml = self.paths.input_yaml
+        opt.input_yaml = input_yaml
         opt.pc_dbcbs_cfg_yaml = self.paths.pc_dbcbs_cfg_yaml
         opt.opt_cfg_yaml = self.paths.opt_cfg_yaml
         opt.time_limit = float(self.paths.time_limit)
 
         opt.dynobench_base = self.paths.dynobench_base
         opt.motion_primitives_base = self.paths.motion_primitives_base
-        opt.warmstart_optimization = self.paths.warmstart_optimization
+        opt.warmstart_optimization = bool(warmstart)
+        opt.output_yaml = os.path.join(plan_dir, "result_dbcbs.yaml")
+        opt.optimization_yaml = os.path.join(plan_dir, "result_dbcbs_opt.yaml")
+        opt.N_opt = self.paths.N_opt
+        res = self.pcdbcbs.run(opt)
 
-        if self.paths.keep_files:
-            work_dir = self._make_work_dir()
-            opt.output_yaml = os.path.join(work_dir, "result_dbcbs.yaml")
-            opt.optimization_yaml = os.path.join(work_dir, "result_dbcbs_opt.yaml")
-            res = self.pcdbcbs.run(opt)
-        else:
-            if self.paths.work_dir_root is not None:
-                os.makedirs(self.paths.work_dir_root, exist_ok=True)
-
-            with tempfile.TemporaryDirectory(dir=self.paths.work_dir_root, prefix="pcdbcbs_") as work_dir:
-                opt.output_yaml = os.path.join(work_dir, "result_dbcbs.yaml")
-                opt.optimization_yaml = os.path.join(work_dir, "result_dbcbs_opt.yaml")
-                res = self.pcdbcbs.run(opt)
-
-        if not getattr(res, "feasible", False) or getattr(res, "U", np.array([])).size == 0:
+        if  getattr(res, "U", np.array([])).size == 0:
+        # if not getattr(res, "feasible", False) or getattr(res, "U", np.array([])).size == 0:
             raise RuntimeError(
                 f"pc-dbCBS failed or returned empty U. "
-                f"feasible={getattr(res,'feasible',None)} solved_db={getattr(res,'solved_db',None)} "
+                f"feasible={getattr(res,'feasible',None)} "
+                f"solved_db={getattr(res,'solved_db',None)} "
                 f"solved_opt={getattr(res,'solved_opt',None)}"
             )
 
@@ -133,6 +201,7 @@ class PcDbCBSExpert:
         if U.ndim != 2:
             raise RuntimeError(f"Expected res.U shape (T, nu), got {U.shape}")
 
+        # scale + clamp
         U = U * self.u_nominal
         U = np.clip(U, self.act_low[None, :], self.act_high[None, :])
 
@@ -140,83 +209,41 @@ class PcDbCBSExpert:
         self._t = 0
         self.size_u = int(U.shape[1])
 
-    def _write_patched_input_yaml(self, state: np.ndarray) -> Tuple[str, str]:
-        """
-        state is the physical state only (13*n):
-          [payload_pose(7), quad1_pose(7), ..., quadM_pose(7),
-           payload_vel(6),  quad1_vel(6),  ..., quadM_vel(6)]
-        """
-        with open(self._template_input_yaml, "r") as f:
-            cfg = yaml.safe_load(f)
+    def _plan_from_state(self, state: np.ndarray, plan_dir: str, warmstart: bool):
+        input_yaml = self._write_patched_input_yaml(state, plan_dir)
+        self._plan(input_yaml=input_yaml, plan_dir=plan_dir, warmstart=warmstart)
 
-        state = np.asarray(state, dtype=float).reshape(-1)
-
-        if state.size % 13 != 0:
-            raise ValueError(f"state length {state.size} is not 13*n")
-
-        # ---- existing behavior: patch joint_robot start ----
-        cfg["joint_robot"][0]["start"] = state.tolist()
-
-        # ---- MINIMAL FIX: also patch robots[i].start from joint_robot state ----
-        # n_bodies = 1(payload) + n_quads
-        n_bodies = state.size // 13
-        n_quads = n_bodies - 1
-
-        # If robots list exists and lengths match, set each robot start = [quad_pose(7), quad_vel(6)]
-        if "robots" in cfg and isinstance(cfg["robots"], list) and len(cfg["robots"]) >= n_quads:
-            # poses block length = 7*n_bodies
-            pose_block = state[: 7 * n_bodies]
-            vel_block = state[7 * n_bodies : 7 * n_bodies + 6 * n_bodies]
-
-            for i in range(n_quads):
-                quad_pose = pose_block[7 * (1 + i) : 7 * (1 + i + 1)]   # skip payload pose
-                quad_vel = vel_block[6 * (1 + i) : 6 * (1 + i + 1)]     # skip payload vel
-                cfg["robots"][i]["start"] = np.concatenate([quad_pose, quad_vel]).tolist()
-
-        if self.paths.work_dir_root is not None:
-            os.makedirs(self.paths.work_dir_root, exist_ok=True)
-
-        tmp_dir = tempfile.mkdtemp(dir=self.paths.work_dir_root, prefix="pcdbcbs_input_")
-        patched_yaml = os.path.join(tmp_dir, "input.yaml")
-
-        with open(patched_yaml, "w") as f:
-            yaml.safe_dump(cfg, f)
-
-        return patched_yaml, tmp_dir
-
-    def _plan_from_state(self, state: np.ndarray):
-        patched_yaml, tmp_dir = self._write_patched_input_yaml(state)
-        old = self.paths.input_yaml
-        try:
-            self.paths.input_yaml = patched_yaml
-            self._plan()
-        finally:
-            self.paths.input_yaml = old
-            if not self.paths.keep_files:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-
+    # ----------------------------
+    # Acting
+    # ----------------------------
     def act(self, obs: np.ndarray) -> np.ndarray:
         self.just_replanned = False
 
         obs = np.asarray(obs, dtype=np.float32).reshape(-1)
-        state = obs[: self._state_dim]   # <-- slice state only
+        state = obs[: self._state_dim]
 
-        # warmstart switching based on payload position (state[:3])
         payload_pos = state[:3]
         dist_to_goal = float(np.linalg.norm(payload_pos - self._payload_goal_pos))
         use_warmstart = dist_to_goal > self.goal_switch_dist
-
+        use_warmstart = use_warmstart and self.paths.warmstart_optimization
         need_first_plan = (self._U is None)
         plan_exhausted = (self._U is not None and self._t >= self._U.shape[0])
-        need_periodic_replan = (self.replan_every_k > 0 and self._global_step % self.replan_every_k == 0)
+        need_periodic_replan = (
+            self.replan_every_k > 0
+            and self._global_step > 0
+            and (self._global_step % self.replan_every_k == 0)
+        )
 
         if need_first_plan or plan_exhausted or need_periodic_replan:
-            old_ws = self.paths.warmstart_optimization
+            reason = "first" if need_first_plan else ("exhausted" if plan_exhausted else "periodic")
+            plan_dir = self._make_plan_dir(warmstart=use_warmstart, reason=reason)
+            self._write_meta_yaml(plan_dir, reason=reason, dist_to_goal=dist_to_goal, warmstart=use_warmstart)
+
             try:
-                self.paths.warmstart_optimization = bool(use_warmstart)
-                self._plan_from_state(state)
+                self._plan_from_state(state, plan_dir=plan_dir, warmstart=use_warmstart)
             finally:
-                self.paths.warmstart_optimization = old_ws
+                if not self.paths.keep_files:
+                    shutil.rmtree(plan_dir, ignore_errors=True)
 
             self._t = 0
             self.just_replanned = True

@@ -85,8 +85,8 @@ class PayloadGymEnv(gym.Env):
 
         self.prev_action = np.zeros((self.action_dim,), dtype=np.float32)
         self.payload_bounds = (
-            np.array([-1.0, -1.0, 0.48], dtype=np.float32),   # low
-            np.array([-0.95, -0.95, 0.5], dtype=np.float32), # high
+            np.array([-1.5, -1.5, 0.3], dtype=np.float32),   # low
+            np.array([1.5, 1.5,  0.5], dtype=np.float32), # high
         )
     def _get_state(self) -> np.ndarray:
         # EXACT same mapping you used before
@@ -96,6 +96,15 @@ class PayloadGymEnv(gym.Env):
         state = self._get_state()
         return np.concatenate([state, self.goal, self.prev_action], axis=0).astype(np.float32)
 
+    def _payload_pos(self) -> np.ndarray:
+        # state layout in your obs: payload pose starts at index 0
+        state = self._get_state()
+        return state[:3].astype(np.float32)
+
+    def _is_out_of_bounds(self) -> bool:
+        p = self._payload_pos()
+        low, high = self.payload_bounds
+        return bool(np.any(p < low) or np.any(p > high))
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -137,7 +146,7 @@ class PayloadGymEnv(gym.Env):
     #     payload_pos, quad_pos = sample_payload_and_quads(
     #     payload_bounds=self.payload_bounds,  # (low, high)
     #     n_quads=self.n_quads,
-    #     cable_min=0.49,
+    #     cable_min=0.3,
     #     cable_max=0.5,
     #     rng=rng,
     #     quad_radius=0.1,
@@ -147,7 +156,7 @@ class PayloadGymEnv(gym.Env):
     #     # IMPORTANT: MuJoCo qpos wants quats as wxyz
     #     payload_quat_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
 
-    #     # quad_quats_xyzw = np.stack([sample_bounded_quat(0.1, rng) for _ in range(self.n_quads)], axis=0)
+    #     # quad_quats_xyzw = np.stack([sample_bounded_quat(10, rng) for _ in range(self.n_quads)], axis=0)
     #     quad_quats_xyzw = np.stack([np.array([0,0,0,1]) for _ in range(self.n_quads)], axis=0)
     #     quad_quats_wxyz = np.zeros_like(quad_quats_xyzw, dtype=np.float64)
     #     for i in range(self.n_quads):
@@ -157,7 +166,7 @@ class PayloadGymEnv(gym.Env):
     #     # --- sample velocities ---
     #     # p_lin,p_ang: (3,), (3,)
     #     # q_lin,q_ang: (n_quads,3), (n_quads,3)
-    #     p_lin, p_ang, q_lin, q_ang = sample_velocities(self.n_quads, rng=rng)
+    #     p_lin, p_ang, q_lin, q_ang = sample_velocities(self.n_quads, lin_vel_max=0.5, ang_vel_max=0.5, rng=rng)
 
     #     # --- build qpos block for ALL bodies first ---
     #     qpos = np.zeros((7 * self.n_bodies,), dtype=np.float64)
@@ -192,6 +201,12 @@ class PayloadGymEnv(gym.Env):
 
 
     def step(self, action):
+        # --- guard: if somehow called again after already OOB, terminate immediately ---
+        if self._is_out_of_bounds():
+            obs = self._get_obs()
+            info = {"out_of_bounds": True, "dist_goal": float("inf")}
+            return obs, -100.0, True, False, info  # terminated=True
+
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
@@ -203,18 +218,25 @@ class PayloadGymEnv(gym.Env):
 
         obs = self._get_obs()
 
-        # Minimal reward: negative payload position distance to goal
+        # reward as before
         state = obs[: self.state_dim]
         payload_pos = state[:3]
         goal_pos = self.goal[:3]
         dist_goal = float(np.linalg.norm(payload_pos - goal_pos))
         reward = -dist_goal
 
-        terminated = dist_goal < 0.02
-        truncated = self.step_count >= self.max_steps
-        info = {"dist_goal": dist_goal}
+        # --- NEW: out-of-bounds termination after stepping ---
+        out_of_bounds = self._is_out_of_bounds()
+        if out_of_bounds:
+            # strong penalty to teach the learner to avoid leaving workspace
+            reward -= 100.0
 
+        terminated = (dist_goal < 0.02) or out_of_bounds
+        truncated = self.step_count >= self.max_steps
+
+        info = {"dist_goal": dist_goal, "out_of_bounds": out_of_bounds}
         return obs, reward, terminated, truncated, info
+
 
 
 if __name__ == "__main__":
@@ -227,7 +249,7 @@ if __name__ == "__main__":
     template_yaml = (
         "/home/khaledwahba94/inria/imitation-agile-payload-manipulation/"
         "deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/"
-        "mujocoquadspayload_empty2.yaml"
+        "mujocoquadspayload_zerogoal.yaml"
     )
 
     env = PayloadGymEnv(
@@ -247,12 +269,13 @@ if __name__ == "__main__":
         bindings_path="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/build",
         input_yaml=template_yaml,
         pc_dbcbs_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/pc_dbcbs_empty.yaml",
-        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt.yaml",
+        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt_expert.yaml",
         dynobench_base="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/",
         motion_primitives_base="/home/khaledwahba94/inria/pc-dbCBS/motion_primitives/",
         work_dir_root="runs/_tmp_pcdbcbs",
         keep_files=False,
         warmstart_optimization=True,
+        N_opt=100,                        # <== number of optimization steps
     )
 
     expert = PcDbCBSExpert(
@@ -285,7 +308,7 @@ if __name__ == "__main__":
     x_traj = []
     replan_steps = []
 
-    T_total = 500
+    T_total = 200
     for t in range(T_total):
         action = expert.act(obs)
         if expert.just_replanned:
@@ -322,9 +345,9 @@ if __name__ == "__main__":
     cfg = VideoConfig(
         out_dir="videos/test_pcdbcbs_payload",
         fps=50,
-        views=["side", "top"],
-        env_min=[-2.0, -2.0, 0],
-        env_max=[+2.0, +2.0, 2],
+        views=["diag"],
+        env_min=[-2.5, -2.5, 0],
+        env_max=[+2.5, +2.5, 2],
     )
 
     render_from_actions(
