@@ -1,3 +1,132 @@
+import matplotlib.pyplot as plt
+import numpy as np
+
+def plot_all_state(
+    state,
+    n_bodies,
+    radius=0.1,
+    title="Payload + Quads (Enhanced)",
+    save_path_prefix="pos_all",
+    show=False,
+):
+    """
+    Enhanced visualization:
+    - 3D plot with improved aspect and grid
+    - 2D projections: x-z and x-y
+    - Velocity vectors for each body
+    - PDF output for all plots
+    """
+    state = np.asarray(state).reshape(-1)
+    assert state.size == 13 * n_bodies
+
+    poses = state[: 7 * n_bodies]
+    vels = state[7 * n_bodies :]
+
+    positions = []
+    velocities = []
+    for i in range(n_bodies):
+        pos = poses[7 * i : 7 * i + 3]
+        vel = vels[6 * i : 6 * i + 3]  # linear velocity
+        positions.append(pos)
+        velocities.append(vel)
+    positions = np.array(positions)
+    velocities = np.array(velocities)
+
+    # --- 3D Plot ---
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    u = np.linspace(0, 2 * np.pi, 32)
+    v = np.linspace(0, np.pi, 24)
+    sx = radius * np.outer(np.cos(u), np.sin(v))
+    sy = radius * np.outer(np.sin(u), np.sin(v))
+    sz = radius * np.outer(np.ones_like(u), np.cos(v))
+
+    for i in range(n_bodies):
+        pos = positions[i]
+        color = "tab:red" if i == 0 else "tab:blue"
+        label = "payload" if i == 0 else ("quad" if i == 1 else None)
+        ax.plot_surface(sx + pos[0], sy + pos[1], sz + pos[2], color=color, alpha=0.5, linewidth=0)
+        ax.scatter(*pos, color=color, s=80, label=label)
+        # Velocity arrow
+        ax.quiver(pos[0], pos[1], pos[2], velocities[i][0], velocities[i][1], velocities[i][2],
+                  color=color, length=0.3, arrow_length_ratio=0.2, linewidth=2)
+
+    ax.set_title(title)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_zlabel("z [m]")
+    ax.legend()
+    ax.grid(True)
+    mins = positions.min(axis=0) - radius
+    maxs = positions.max(axis=0) + radius
+    ax.set_xlim(mins[0], maxs[0])
+    ax.set_ylim(mins[1], maxs[1])
+    ax.set_zlim(mins[2], maxs[2])
+    ax.set_box_aspect(maxs - mins)
+    plt.tight_layout()
+    pdf_path_3d = f"{save_path_prefix}_3d.pdf"
+    plt.savefig(pdf_path_3d)
+    print(f"[plot] saved 3D to {pdf_path_3d}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    # --- 2D Plot: x-z ---
+    fig2, ax2 = plt.subplots(figsize=(7, 6))
+    for i in range(n_bodies):
+        pos = positions[i]
+        vel = velocities[i]
+        color = "tab:red" if i == 0 else "tab:blue"
+        label = "payload" if i == 0 else ("quad" if i == 1 else None)
+        circle = plt.Circle((pos[0], pos[2]), radius, color=color, alpha=0.5)
+        ax2.add_patch(circle)
+        ax2.scatter(pos[0], pos[2], color=color, s=80, label=label)
+        ax2.arrow(pos[0], pos[2], vel[0], vel[2], color=color, width=0.01, head_width=0.07, length_includes_head=True)
+    ax2.set_title(title + " (x-z)")
+    ax2.set_xlabel("x [m]")
+    ax2.set_ylabel("z [m]")
+    ax2.set_aspect('equal')
+    ax2.grid(True)
+    ax2.legend()
+    ax2.set_xlim(mins[0], maxs[0])
+    ax2.set_ylim(mins[2], maxs[2])
+    plt.tight_layout()
+    pdf_path_xz = f"{save_path_prefix}_xz.pdf"
+    plt.savefig(pdf_path_xz)
+    print(f"[plot] saved x-z to {pdf_path_xz}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig2)
+
+    # --- 2D Plot: x-y ---
+    fig3, ax3 = plt.subplots(figsize=(7, 6))
+    for i in range(n_bodies):
+        pos = positions[i]
+        vel = velocities[i]
+        color = "tab:red" if i == 0 else "tab:blue"
+        label = "payload" if i == 0 else ("quad" if i == 1 else None)
+        circle = plt.Circle((pos[0], pos[1]), radius, color=color, alpha=0.5)
+        ax3.add_patch(circle)
+        ax3.scatter(pos[0], pos[1], color=color, s=80, label=label)
+        ax3.arrow(pos[0], pos[1], vel[0], vel[1], color=color, width=0.01, head_width=0.07, length_includes_head=True)
+    ax3.set_title(title + " (x-y)")
+    ax3.set_xlabel("x [m]")
+    ax3.set_ylabel("y [m]")
+    ax3.set_aspect('equal')
+    ax3.grid(True)
+    ax3.legend()
+    ax3.set_xlim(mins[0], maxs[0])
+    ax3.set_ylim(mins[1], maxs[1])
+    plt.tight_layout()
+    pdf_path_xy = f"{save_path_prefix}_xy.pdf"
+    plt.savefig(pdf_path_xy)
+    print(f"[plot] saved x-y to {pdf_path_xy}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig3)
 import yaml
 import numpy as np
 import mujoco
@@ -86,7 +215,8 @@ def sample_bounded_quat(max_tilt_deg: float, rng: np.random.Generator):
     qy = cr*sp*cy + sr*cp*sy
     qz = cr*cp*sy - sr*sp*cy
 
-    return np.array([qw, qx, qy, qz], dtype=np.float64)
+    # return np.array([qw, qx, qy, qz], dtype=np.float64)
+    return np.array([qx, qy, qz, qw], dtype=np.float64)
 
 
 
@@ -160,7 +290,7 @@ def sample_payload_and_quads(
             d = rng.uniform(cable_min, cable_max)
 
             # IMPORTANT: upper hemisphere so quad tends to be above payload
-            q = sample_unit_vector_with_elevation_limits(rng, elev_min_deg=65.0, elev_max_deg=68.0)
+            q = sample_unit_vector_with_elevation_limits(rng, elev_min_deg=60.0, elev_max_deg=70.0)
 
             p = payload_pos + d * q
 

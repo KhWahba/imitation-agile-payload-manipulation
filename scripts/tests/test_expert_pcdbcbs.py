@@ -46,25 +46,25 @@ def get_obs_from_qpos_qvel(data, n_bodies: int, quat_out: str = "xyzw") -> np.nd
     return obs
 
 def main():
-    xml_path = "/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/models/xml/2cfs_payload_tendons_empty.xml"
+    xml_path = "/home/khaledwahba94/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/models/xml/2cfs_payload_tendons_empty.xml"
 
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
-
+    nu = model.nu  # number of actuators
     # actuator bounds
     ctrlrange = model.actuator_ctrlrange.copy()
-    act_low = ctrlrange[:, 0].astype(np.float32)
-    act_high = ctrlrange[:, 1].astype(np.float32)  # normalize by nominal thrust
+    act_low = 0.0 * np.ones(nu)  #ctrlrange[:, 0].astype(np.float32)
+    act_high = 1.4 * np.ones(nu) #ctrlrange[:, 1].astype(np.float32)
 
     # Pick bodies (or infer)
     paths = PcDbCBSPaths(
-        bindings_path="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/build",
-        input_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_zerogoal.yaml",
-        pc_dbcbs_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/pc_dbcbs_empty.yaml",
-        opt_cfg_yaml="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt_expert.yaml",
-        dynobench_base="/home/khaledwahba94/inria/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/",
-        motion_primitives_base="/home/khaledwahba94/inria/pc-dbCBS/motion_primitives/",
-        time_limit=350000.0,
+        bindings_path="/home/khaledwahba94/imitation-agile-payload-manipulation/deps/pc-dbCBS/build",
+        input_yaml="/home/khaledwahba94/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/envs/mujoco/mujocoquadspayload_zerogoal.yaml",
+        pc_dbcbs_cfg_yaml="/home/khaledwahba94/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/pc_dbcbs_empty.yaml",
+        opt_cfg_yaml="/home/khaledwahba94/imitation-agile-payload-manipulation/deps/pc-dbCBS/configs/opt_training.yaml",
+        dynobench_base="/home/khaledwahba94/imitation-agile-payload-manipulation/deps/pc-dbCBS/deps/dynoplan/dynobench/",
+        motion_primitives_base="/home/khaledwahba94/pc-dbCBS/motion_primitives/",
+        time_limit=100000.0,
         work_dir_root="runs/_tmp_pcdbcbs",  # temp root
         keep_files=True,                   # <== no file clutter
         warmstart_optimization=True,    # <== disable warmstart for optimization-only mode
@@ -89,7 +89,7 @@ def main():
     obs = get_obs_from_qpos_qvel(data, n_bodies, quat_out="xyzw")
     # u0 = expert.act(obs)
 
-    T_total = 200   # or 5*K
+    T_total = 150   # or 5*K
     replan_steps = []
     for t in range(T_total):
         obs = get_obs_from_qpos_qvel(data, n_bodies, quat_out="xyzw")
@@ -97,10 +97,11 @@ def main():
         if expert.just_replanned:
             print(f"[replan] t={t}")
             replan_steps.append(t)
-
-        data.ctrl[:] = u
+        u_mujoco = u * expert.u_nominal
+        data.ctrl[:] = u_mujoco  # scale from [0,1] to actual thrust range
+        # exit()
         mujoco.mj_step(model, data)
-        u_traj.append(u.copy())
+        u_traj.append(u_mujoco.copy())
         x_traj.append(np.concatenate([data.qpos.copy(), data.qvel.copy()]))
     print("Replans at:", replan_steps)
 
@@ -114,8 +115,8 @@ def main():
         out_dir="videos/test_pcdbcbs_payload",
         fps=50,
         views=["side", "top", "diag"],
-        env_min=[-1.5, -1.5, 0],
-        env_max=[+1.5, +1.5, 2],
+        env_min=[-2.5, -2.5, 0],
+        env_max=[+2.5, +2.5, 2],
     )
 
     render_from_actions(
@@ -124,7 +125,7 @@ def main():
         cfg=cfg,
     )
 
-    # print("Videos written to:", cfg.out_dir)
+    print("Videos written to:", cfg.out_dir)
 
 
 if __name__ == "__main__":
