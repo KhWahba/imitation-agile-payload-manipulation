@@ -1,4 +1,7 @@
 __pycache__/
 */runs/*
-.venv/*
-runs/*
+.venv/
+runs/
+scripts/runs/
+*.log
+*.jsonl
