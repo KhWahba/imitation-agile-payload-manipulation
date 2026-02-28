@@ -66,15 +66,15 @@ class PcDbCBSExpert:
             sys.path.append(paths.bindings_path)
 
         try:
-            import pcdbcbs  # type: ignore # noqa: F401
+            import pcdbcbs_dbg as pcdbcbs  # type: ignore # noqa: F401
         except Exception as e:
             raise RuntimeError(
-                "Could not import pcdbcbs. "
+                "Could not import pcdbcbs_dbg. "
                 f"Check bindings_path={paths.bindings_path}\n"
                 f"Original error: {e}"
             )
 
-        import pcdbcbs # pyright: ignore[reportMissingImports]
+        import pcdbcbs_dbg as pcdbcbs  # pyright: ignore[reportMissingImports]
         self.pcdbcbs = pcdbcbs
 
         self._U: Optional[np.ndarray] = None

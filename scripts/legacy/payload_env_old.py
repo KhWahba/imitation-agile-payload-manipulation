@@ -1,5 +1,4 @@
 # payload_gym_env.py
-import os
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -14,13 +13,15 @@ np.set_printoptions(
 
 class PayloadGymEnv(gym.Env):
     """
-    Observation (expert-compatible + learner features):
-        obs = [raw_state, learner_features]
-    where raw_state is preserved as a prefix so the expert wrappers that read
-    obs[:state_dim] continue to work unchanged.
+    Observation:
+        obs = [state, goal, prev_action]
+    where:
+        state = 13 * (1 + quadsNum)
+        goal  = same dimension as state (from template YAML joint_robot[0]["goal"])
+        prev_action = nu = 4 * quadsNum
 
     Action:
-        u_t in R^{nu}, normalized to [-1, 1]
+        u_t in R^{nu}
     """
 
     def __init__(
@@ -36,11 +37,6 @@ class PayloadGymEnv(gym.Env):
         self.max_steps = int(max_steps)
         self.step_count = 0
         self.terminate_on_success = True
-        # Success is declared only after staying near the goal for several consecutive steps.
-        self.success_dist = 0.02
-        self.success_hold_steps_required = 10
-        self.success_hold_count = 0
-        self.debug_done_reasons = os.environ.get("PAYLOAD_ENV_DEBUG_DONE_REASONS", "0") == "1"
 
         # Read quadsNum and goal from the SAME YAML the expert uses
         with open(template_yaml_path, "r") as f:
@@ -78,13 +74,6 @@ class PayloadGymEnv(gym.Env):
         # fallback (adjust later if needed)
         self.u_nominal = 0.034*9.81/4  # nominal per-rotor thrust to hover one quad, TODO: fix this from cf mass from mujoco model if possible
         self.action_mujoco = np.zeros((self.action_dim,), dtype=np.float32)  # for logging / rendering convenience
-
-        # Planner action range: the planner outputs in [planner_act_low, planner_act_high]
-        # Policy space is [-1, 1]. The env maps [-1, 1] back to planner range, then to Newtons.
-        self.planner_act_low = np.zeros(self.action_dim, dtype=np.float32)
-        self.planner_act_high = 1.4 * np.ones(self.action_dim, dtype=np.float32)
-        self._act_mid = 0.5 * (self.planner_act_low + self.planner_act_high)
-        self._act_half = 0.5 * (self.planner_act_high - self.planner_act_low)
         # self.action_space = spaces.Box(
         #     low=np.zeros(self.action_dim, dtype=np.float32),
         #     high=np.ones(self.action_dim, dtype=np.float32) * 1.4,
@@ -94,134 +83,36 @@ class PayloadGymEnv(gym.Env):
                                     high=np.ones(self.action_dim, np.float32),
                                     dtype=np.float32)
 
-        # Obs space: [raw_state, learner_features]
-        # learner_features = payload_pos_err(3) + payload_vel(3)
-        #                  + n_quads * (rel_pos_err(3) + rel_vel_err(3) + quat_err_vec(3) + ang_vel_err(3))
-        #                  + prev_action(action_dim)
-        self.learner_obs_dim = 6 + self.n_quads * 12 + self.action_dim
-        obs_dim = self.state_dim + self.learner_obs_dim
+        # Obs space: [state, goal, prev_action]
+        # obs_dim = self.state_dim + self.state_dim + self.action_dim
+        obs_dim = self.state_dim + self.state_dim 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
 
         self.prev_action = np.zeros((self.action_dim,), dtype=np.float32)
-        # Match planner workspace bounds from the dynobench env YAML (environment.min/max).
-        # pc-dbCBS passes these bounds as problem.p_lb/p_ub and the MujocoQuadsPayload model
-        # applies them to both payload and quad positions in x_lb/x_ub.
-        env_min = np.asarray(cfg["environment"]["min"], dtype=np.float32).reshape(-1)
-        env_max = np.asarray(cfg["environment"]["max"], dtype=np.float32).reshape(-1)
-        if env_min.shape != (3,) or env_max.shape != (3,):
-            raise ValueError(f"environment min/max must be 3D, got {env_min.shape} / {env_max.shape}")
-        self.workspace_bounds = (env_min, env_max)
-        self.payload_bounds = (env_min.copy(), env_max.copy())
-        self.quad_bounds = (env_min.copy(), env_max.copy())
+        self.payload_bounds = (
+            np.array([-2.5, -2.5, 0.0], dtype=np.float32),   # low
+            np.array([2.5, 2.5,  1.0], dtype=np.float32), # high
+        )
     def _get_state(self) -> np.ndarray:
         # EXACT same mapping you used before
         return get_obs_from_qpos_qvel(self.data, self.n_bodies, quat_out="xyzw")
 
     def _get_obs(self) -> np.ndarray:
         state = self._get_state()
-        feats = self._get_learner_features(state)
-        return np.concatenate([state, feats], axis=0).astype(np.float32)
+        # return np.concatenate([state, self.goal, self.prev_action], axis=0).astype(np.float32)
+        return np.concatenate([state, self.goal], axis=0).astype(np.float32)
 
     def _payload_pos(self) -> np.ndarray:
         # state layout in your obs: payload pose starts at index 0
         state = self._get_state()
         return state[:3].astype(np.float32)
 
-    @staticmethod
-    def _quat_xyzw_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
-        x1, y1, z1, w1 = q1
-        x2, y2, z2, w2 = q2
-        return np.array([
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        ], dtype=np.float32)
-
-    @staticmethod
-    def _quat_xyzw_inv(q: np.ndarray) -> np.ndarray:
-        x, y, z, w = q
-        n2 = float(np.dot(q, q))
-        if n2 <= 1e-12:
-            return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-        return np.array([-x, -y, -z, w], dtype=np.float32) / n2
-
-    def _quad_quat_error_vec(self, q_des_xyzw: np.ndarray, q_xyzw: np.ndarray) -> np.ndarray:
-        q_err = self._quat_xyzw_mul(self._quat_xyzw_inv(q_des_xyzw), q_xyzw)
-        # Canonicalize sign so q and -q represent the same attitude consistently.
-        if q_err[3] < 0:
-            q_err = -q_err
-        return q_err[:3].astype(np.float32)
-
-    def _get_learner_features(self, state: np.ndarray) -> np.ndarray:
-        """Learner features while assuming payload is a point mass (ignore payload quat/ang vel)."""
-        state = np.asarray(state, dtype=np.float32).reshape(-1)
-        goal = self.goal.astype(np.float32)
-        n = self.n_bodies
-
-        poses = state[: 7 * n]
-        vels = state[7 * n :]
-        goal_poses = goal[: 7 * n]
-        # By design for this setup, desired payload/quad linear+angular velocities are treated as zero.
-        goal_vels = np.zeros_like(vels, dtype=np.float32)
-
-        # Payload position error and payload linear velocity
-        pL = poses[0:3]
-        pL_goal = goal_poses[0:3]
-        vL = vels[0:3]
-        feat_parts = [pL - pL_goal, vL]
-
-        # Per-quad blocks: relative pos error, relative vel error, quat error vec, ang vel error
-        for qi in range(self.n_quads):
-            pose_base = 7 * (1 + qi)
-            vel_base = 6 * (1 + qi)
-
-            p_i = poses[pose_base : pose_base + 3]
-            q_i = poses[pose_base + 3 : pose_base + 7]
-            v_i = vels[vel_base : vel_base + 3]
-            w_i = vels[vel_base + 3 : vel_base + 6]
-
-            p_i_goal = goal_poses[pose_base : pose_base + 3]
-            q_i_goal = goal_poses[pose_base + 3 : pose_base + 7]
-            v_i_goal = goal_vels[vel_base : vel_base + 3]
-            w_i_goal = goal_vels[vel_base + 3 : vel_base + 6]
-
-            e_p_rel = (p_i - pL) - (p_i_goal - pL_goal)
-            e_v_rel = (v_i - vL) - (v_i_goal - goal_vels[0:3])
-            e_q = self._quad_quat_error_vec(q_i_goal, q_i)
-            e_w = w_i - w_i_goal
-
-            feat_parts.extend([e_p_rel, e_v_rel, e_q, e_w])
-
-        feat_parts.append(self.prev_action.astype(np.float32))
-        return np.concatenate(feat_parts, axis=0).astype(np.float32)
-
     def _is_out_of_bounds(self) -> bool:
         p = self._payload_pos()
         low, high = self.payload_bounds
         return bool(np.any(p < low) or np.any(p > high))
-
-    def _quad_positions(self) -> np.ndarray:
-        state = self._get_state()
-        if self.n_quads <= 0:
-            return np.zeros((0, 3), dtype=np.float32)
-        positions = []
-        for qi in range(self.n_quads):
-            # Layout is poses-first then velocities:
-            # [payload pose(7), quad1 pose(7), ..., payload vel(6), quad1 vel(6), ...]
-            # so quad positions live in the poses block with stride 7.
-            base = 7 * (1 + qi)
-            positions.append(state[base: base + 3])
-        return np.asarray(positions, dtype=np.float32)
-
-    def _is_any_quad_out_of_bounds(self) -> bool:
-        if self.n_quads <= 0:
-            return False
-        qpos = self._quad_positions()
-        low, high = self.quad_bounds
-        return bool(np.any(qpos < low) or np.any(qpos > high))
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -251,7 +142,6 @@ class PayloadGymEnv(gym.Env):
 
         self.prev_action[:] = 0.0
         self.step_count = 0
-        self.success_hold_count = 0
         return self._get_obs(), {}
 
     # def reset(self, *, seed=None, options=None):
@@ -319,34 +209,16 @@ class PayloadGymEnv(gym.Env):
 
 
     def step(self, action):
-        # --- guard: if somehow called again after already OOB, end immediately ---
-        payload_oob_pre = self._is_out_of_bounds()
-        quad_oob_pre = self._is_any_quad_out_of_bounds()
-        if payload_oob_pre or quad_oob_pre:
+        # --- guard: if somehow called again after already OOB, terminate immediately ---
+        if self._is_out_of_bounds():
             obs = self._get_obs()
-            info = {
-                "out_of_bounds": bool(payload_oob_pre or quad_oob_pre),
-                "payload_out_of_bounds": bool(payload_oob_pre),
-                "quad_out_of_bounds": bool(quad_oob_pre),
-                "dist_goal": float("inf"),
-            }
-            if self.debug_done_reasons:
-                print(
-                    "[PAYLOAD_ENV_DONE] "
-                    f"step={self.step_count} terminated={True} "
-                    f"truncated={False} "
-                    "dist=inf "
-                    f"payload_oob={bool(payload_oob_pre)} quad_oob={bool(quad_oob_pre)} "
-                    f"in_goal={False} hold={int(self.success_hold_count)}/{int(self.success_hold_steps_required)} "
-                    "(pre-step-guard)",
-                    flush=True,
-                )
-            return obs, -100.0, True, False, info
+            info = {"out_of_bounds": True, "dist_goal": float("inf")}
+            return obs, -100.0, True, False, info  # terminated=True
 
         action = np.asarray(action, dtype=np.float32).reshape(-1)
         a = np.clip(action, -1.0, 1.0)
-        action_planner = a * self._act_half + self._act_mid   # maps [-1,1] -> [act_low, act_high]
-        self.action_mujoco = action_planner * self.u_nominal
+        action_01 = 0.7 * (a + 1.0)          # maps [-1,1] -> [0,1.4]
+        self.action_mujoco = action_01 * self.u_nominal
         self.data.ctrl[: self.action_dim] = self.action_mujoco
         mujoco.mj_step(self.model, self.data)
 
@@ -363,41 +235,16 @@ class PayloadGymEnv(gym.Env):
         reward = -dist_goal
 
         # --- NEW: out-of-bounds termination after stepping ---
-        payload_oob = self._is_out_of_bounds()
-        quad_oob = self._is_any_quad_out_of_bounds()
-        out_of_bounds = bool(payload_oob or quad_oob)
+        out_of_bounds = self._is_out_of_bounds()
         if out_of_bounds:
             # strong penalty to teach the learner to avoid leaving workspace
             reward -= 100.0
-        in_goal_region = dist_goal < float(self.success_dist)
-        if in_goal_region and not out_of_bounds:
-            self.success_hold_count += 1
-        else:
-            self.success_hold_count = 0
-        stable_success = self.success_hold_count >= int(self.success_hold_steps_required)
-        oob_terminated = bool(payload_oob or quad_oob)
-        terminated = (stable_success and self.terminate_on_success) or oob_terminated
-        truncated = (self.step_count >= self.max_steps)
+        SUCCESS_DIST = 0.05  # start here
+        success = dist_goal < SUCCESS_DIST
+        terminated = (success and self.terminate_on_success) or out_of_bounds
+        truncated = self.step_count >= self.max_steps
 
-        info = {
-            "dist_goal": dist_goal,
-            "out_of_bounds": out_of_bounds,
-            "payload_out_of_bounds": bool(payload_oob),
-            "quad_out_of_bounds": bool(quad_oob),
-            "success_dist": float(self.success_dist),
-            "is_in_goal_region": bool(in_goal_region and (not out_of_bounds)),
-            "success_hold_count": int(self.success_hold_count),
-            "success_hold_steps_required": int(self.success_hold_steps_required),
-            "is_success": bool(stable_success and (not out_of_bounds)),
-        }
-        if self.debug_done_reasons and (terminated or truncated):
-            print(
-                "[PAYLOAD_ENV_DONE] "
-                f"step={self.step_count} terminated={bool(terminated)} truncated={bool(truncated)} "
-                f"dist={dist_goal:.4f} payload_oob={bool(payload_oob)} quad_oob={bool(quad_oob)} "
-                f"in_goal={bool(info['is_in_goal_region'])} hold={int(self.success_hold_count)}/{int(self.success_hold_steps_required)}",
-                flush=True,
-            )
+        info = {"dist_goal": dist_goal, "out_of_bounds": out_of_bounds, "success_dist": float(SUCCESS_DIST), "is_success": bool(dist_goal < SUCCESS_DIST and (not out_of_bounds))}
         return obs, reward, terminated, truncated, info
 
 
@@ -499,7 +346,7 @@ if __name__ == "__main__":
         print("\n=== ENV SANITY ===")
         print("n_quads:", env.n_quads, "n_bodies:", env.n_bodies)
         print("state_dim:", env.state_dim, "action_dim:", env.action_dim)
-        print("obs.shape:", obs.shape, "obs_dim expected:", env.state_dim + env.state_dim + env.action_dim)
+        print("obs.shape:", obs.shape, "obs_dim expected:", env.state_dim + env.state_dim)
         print("obs finite:", np.all(np.isfinite(obs)))
         print("initial dist_goal:", dist_goal_from_obs(obs))
         print("action_space:", env.action_space)
