@@ -20,12 +20,13 @@ git clone --recurse-submodules <repo-url>
 cd imitation-agile-payload-manipulation
 ```
 
-2. Python environment (uv):
+2. Python environment:
 
 ```bash
-uv venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-uv pip install -r requirements.txt
+pip install -U pip
+pip install -r requirements.txt
 ```
 
 3. Build planner binaries/bindings:
