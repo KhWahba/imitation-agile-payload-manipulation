@@ -90,6 +90,34 @@ Outputs are written to:
 .venv/bin/python scripts/play_rounds.py plot-rewards-progress --demos-root <round_dir_parent>
 ```
 
+## Chunked BC (Standalone, Pre-DAgger)
+
+Use `scripts/bc_chunk.py` to train a policy that predicts `H` future actions from one observation, then evaluate it in three ways:
+
+- `train`: trains BC on chunked labels built from cached expert trajectories.
+- `eval`: closed-loop rollout in MuJoCo using an action buffer + `replan_k`.
+- `eval-offline`: direct chunk prediction error on expert observations.
+- `eval-horizon`: rolls out each predicted chunk for `H` steps and compares predicted observation trajectory against expert observation trajectory.
+
+Config-driven usage:
+
+```bash
+# Edit settings (paths, horizon, epochs, eval params)
+vim scripts/configs/bc_chunk.example.yaml
+
+# Train
+.venv/bin/python scripts/bc_chunk.py train --config scripts/configs/bc_chunk.example.yaml
+
+# Closed-loop eval
+.venv/bin/python scripts/bc_chunk.py eval --config scripts/configs/bc_chunk.example.yaml
+
+# Offline chunk-action eval
+.venv/bin/python scripts/bc_chunk.py eval-offline --config scripts/configs/bc_chunk.example.yaml
+
+# Horizon observation eval
+.venv/bin/python scripts/bc_chunk.py eval-horizon --config scripts/configs/bc_chunk.example.yaml
+```
+
 ## Notes on Branching and PR Split
 
 This project currently uses split PRs across root + submodules.
