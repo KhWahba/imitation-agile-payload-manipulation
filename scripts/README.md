@@ -6,6 +6,9 @@ This folder contains active training/evaluation tooling plus a `legacy/` archive
 - `train_dagger_payload.py`: main DAgger training pipeline (supports env-var tuning).
 - `train_dagger_payload_memprobe_subprocess.py`: wrapped launcher with memory/profiling logs.
 - `bc_chunk.py`: chunked-action BC training and evaluation pipeline.
+- `train_dagger_chunk.py`: chunked-policy bootstrap for DAgger (init BC over chunk labels + ONNX export path).
+- `benchmarks/benchmark_nmpc_bindings.py`: mode-sweep benchmark launcher using NMPC Python bindings.
+- `benchmarks/run_nmpc_binding.py`: minimal Python-bindings runner (`prob_file`, `cfg_file`).
 - `eval_policy.py`: rollout-based policy evaluation + statistical plots.
 - `play_rounds.py`: inspect DAgger rounds, reward/state plotting, demo rendering.
 
