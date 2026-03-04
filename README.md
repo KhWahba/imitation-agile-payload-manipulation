@@ -10,6 +10,9 @@ DAgger/BC training setup for a cooperative multi-quadrotor payload task in MuJoC
 - `envs/`: environment-related assets/configs.
 
 See also: `scripts/README.md` for script-level entrypoints.
+For NMPC + chunk-policy status handoff, see:
+- `docs/FRESH_SESSION_NMPC_DAGGER_HANDOFF.md`
+- `docs/nmpc_policy_chunk_action_tracker.md`
 
 ## Setup
 
